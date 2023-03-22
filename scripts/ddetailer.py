@@ -8,48 +8,86 @@ from modules import processing, images
 from modules import scripts, script_callbacks, shared, devices, modelloader
 from modules.shared import opts, cmd_opts, state
 from modules.sd_models import model_hash
-from modules.paths import models_path
 
 
-dd_models_path = os.path.join(models_path, "mmdet")
+def list_models():
+    return ['None', 'Selfie Segmentation', 'Face Detection', 'Anime Face Detection']
 
 
-def list_models(model_path):
-    model_list = modelloader.load_models(
-        model_path=model_path, ext_filter=[".pth"])
+def update_result_masks(results, masks):
+    """
+    Update the masks for each result in results with the corresponding mask in masks.
 
-    def modeltitle(path, shorthash):
-        abspath = os.path.abspath(path)
+    Args:
+    results: list of segmentation results
+    masks: list of masks to update the results with
 
-        if abspath.startswith(model_path):
-            name = abspath.replace(model_path, '')
-        else:
-            name = os.path.basename(path)
-
-        if name.startswith("\\") or name.startswith("/"):
-            name = name[1:]
-
-        shortname = os.path.splitext(
-            name.replace("/", "_").replace("\\", "_"))[0]
-
-        return f'{name} [{shorthash}]', shortname
-
-    models = []
-    for filename in model_list:
-        h = model_hash(filename)
-        title, short_model_name = modeltitle(filename, h)
-        models.append(title)
-
-    return models
+    Returns:
+    list of updated segmentation results
+    """
+    updated_results = []
+    for i, result in enumerate(results):
+        result["mask"] = masks[i]
+        updated_results.append(result)
+    return updated_results
 
 
-def process_primary_model(init_image, dd_model_a, dd_model_b, dd_bitwise_op,
-                          dd_conf_a, dd_conf_b, dd_dilation_factor_a, dd_dilation_factor_b,
-                          dd_offset_x_a, dd_offset_y_a, dd_offset_x_b, dd_offset_y_b,
-                          n, start_seed, output_images, p, opts, initial_info):
-    # Primary run
-    label_a = "A" if dd_model_b == "None" else dd_bitwise_op
-    results_a = inference(init_image, dd_model_a, dd_conf_a/100.0, label_a)
+def generate_output_images(results_a, init_image, n, start_seed, output_images,
+                           p, opts, initial_info):
+    gen_count = len(results_a)
+    state.job_count += gen_count
+    label_a = "A"
+    segmask_preview_a = create_segmask_preview(results_a, init_image)
+    shared.state.current_image = segmask_preview_a
+
+    if (opts.dd_save_previews):
+        images.save_image(segmask_preview_a, opts.outdir_ddetailer_previews,
+                          "", start_seed, p.prompt, opts.samples_format, p=p)
+
+    print(
+        f"Processing {gen_count} model {label_a} detections for output generation {n + 1}.")
+    p.seed = start_seed
+    p.init_images = [init_image]
+
+    for i in range(gen_count):
+        p.image_mask = results_a[i]["mask"]
+        if (opts.dd_save_masks):
+            images.save_image(results_a[i]["mask"], opts.outdir_ddetailer_masks,
+                              "", start_seed, p.prompt, opts.samples_format, p=p)
+
+        processed = processing.process_images(p)
+
+        if initial_info is None:
+            initial_info = processed.info
+        p.seed = processed.seed + 1
+        p.init_images = processed.images
+
+    if (gen_count > 0):
+        output_images[n] = processed.images[0]
+        if (opts.samples_save):
+            images.save_image(processed.images[0], p.outpath_samples, "",
+                              start_seed, p.prompt, opts.samples_format, info=initial_info, p=p)
+    else:
+        print(
+            f"No model {label_a} detections for output generation {n} with current settings.")
+
+
+def save_previews_and_masks(results_a, init_image, p, opts, start_seed):
+    masks_a = create_segmasks(results_a)
+    segmask_preview_a = create_segmask_preview(results_a, init_image)
+    shared.state.current_image = segmask_preview_a
+    if opts.dd_save_previews:
+        images.save_image(segmask_preview_a, opts.outdir_ddetailer_previews, "", start_seed,
+                          p.prompt, opts.samples_format, p=p)
+    for i, mask in enumerate(masks_a):
+        if opts.dd_save_masks:
+            images.save_image(mask, opts.outdir_ddetailer_masks, "", start_seed, p.prompt+f"_{i+1}",
+                              opts.samples_format, p=p)
+
+
+def create_and_process_masks(results_a, dd_model_b, dd_bitwise_op,
+                             dd_conf_b, dd_dilation_factor_b,
+                             dd_offset_x_b, dd_offset_y_b):
     masks_a = create_segmasks(results_a)
     masks_a = dilate_masks(masks_a, dd_dilation_factor_a, 1)
     masks_a = offset_masks(masks_a, dd_offset_x_a, dd_offset_y_a)
@@ -76,102 +114,86 @@ def process_primary_model(init_image, dd_model_a, dd_model_b, dd_bitwise_op,
             results_a = []
             masks_a = []
 
-    if (len(masks_a) > 0):
+    return masks_a, results_a
+
+
+def process_primary_model(init_image, dd_model_a, dd_model_b, dd_bitwise_op,
+                          dd_conf_a, dd_conf_b, dd_dilation_factor_a, dd_dilation_factor_b,
+                          dd_offset_x_a, dd_offset_y_a, dd_offset_x_b, dd_offset_y_b,
+                          n, start_seed, output_images, p, opts, initial_info):
+    label_a = "A" if dd_model_b == "None" else dd_bitwise_op
+    results_a = inference(init_image, dd_model_a, dd_conf_a/100.0, label_a)
+    masks_a = create_and_process_masks(results_a, dd_model_b, dd_bitwise_op,
+                                       dd_conf_b, dd_dilation_factor_b,
+                                       dd_offset_x_b, dd_offset_y_b)
+
+    if masks_a:
         results_a = update_result_masks(results_a, masks_a)
-        segmask_preview_a = create_segmask_preview(results_a, init_image)
-        shared.state.current_image = segmask_preview_a
-        if (opts.dd_save_previews):
-            images.save_image(segmask_preview_a, opts.outdir_ddetailer_previews,
-                              "", start_seed, p.prompt, opts.samples_format, p=p)
-        gen_count = len(masks_a)
-        state.job_count += gen_count
-        print(
-            f"Processing {gen_count} model {label_a} detections for output generation {n + 1}.")
-        p.seed = start_seed
-        p.init_images = [init_image]
+        save_previews_and_masks(results_a, init_image, p, opts, start_seed)
+        generate_output_images(results_a, init_image, n, start_seed, output_images,
+                               p, opts, initial_info)
 
-        for i in range(gen_count):
-            p.image_mask = masks_a[i]
-            if (opts.dd_save_masks):
-                images.save_image(masks_a[i], opts.outdir_ddetailer_masks,
-                                  "", start_seed, p.prompt, opts.samples_format, p=p)
-
-            processed = processing.process_images(p)
-            if initial_info is None:
-                initial_info = processed.info
-            p.seed = processed.seed + 1
-            p.init_images = processed.images
-
-        if (gen_count > 0):
-            output_images[n] = processed.images[0]
-            if (opts.samples_save):
-                images.save_image(processed.images[0], p.outpath_samples, "",
-                                  start_seed, p.prompt, opts.samples_format, info=initial_info, p=p)
     else:
         print(
             f"No model {label_a} detections for output generation {n} with current settings.")
 
 
-def process_secondary_model(init_image, output_images, opts, p, state, start_seed, dd_model_b, dd_conf_b, dd_preprocess_b, dd_dilation_factor_b, dd_offset_x_b, dd_offset_y_b, n):
-    # Optional secondary pre-processing run
-    if (dd_model_b != "None" and dd_preprocess_b):
-        label_b_pre = "B"
-        results_b_pre = inference(
-            init_image, dd_model_b, dd_conf_b/100.0, label_b_pre)
-        masks_b_pre = create_segmasks(results_b_pre)
-        masks_b_pre = dilate_masks(
-            masks_b_pre, dd_dilation_factor_b, 1)
-        masks_b_pre = offset_masks(
-            masks_b_pre, dd_offset_x_b, dd_offset_y_b)
-        if (len(masks_b_pre) > 0):
-            results_b_pre = update_result_masks(
-                results_b_pre, masks_b_pre)
-            segmask_preview_b = create_segmask_preview(
-                results_b_pre, init_image)
-            shared.state.current_image = segmask_preview_b
-            if (opts.dd_save_previews):
-                images.save_image(segmask_preview_b, opts.outdir_ddetailer_previews,
-                                  "", start_seed, p.prompt, opts.samples_format, p=p)
-            gen_count = len(masks_b_pre)
-            state.job_count += gen_count
-            print(
-                f"Processing {gen_count} model {label_b_pre} detections for output generation {n + 1}.")
-            p.seed = start_seed
-            p.init_images = [init_image]
+def preprocess_secondary_model(init_image, dd_model_b, dd_conf_b, dd_dilation_factor_b, dd_offset_x_b, dd_offset_y_b):
+    label_b_pre = "B"
+    results_b_pre = inference(init_image, dd_model_b,
+                              dd_conf_b/100.0, label_b_pre)
+    masks_b_pre = create_segmasks(results_b_pre)
+    masks_b_pre = dilate_masks(masks_b_pre, dd_dilation_factor_b, 1)
+    masks_b_pre = offset_masks(masks_b_pre, dd_offset_x_b, dd_offset_y_b)
 
-            for i in range(gen_count):
-                p.image_mask = masks_b_pre[i]
-                if (opts.dd_save_masks):
-                    images.save_image(
-                        masks_b_pre[i], opts.outdir_ddetailer_masks, "", start_seed, p.prompt, opts.samples_format, p=p)
-                processed = processing.process_images(p)
-                p.seed = processed.seed + 1
-                p.init_images = processed.images
-
-            if (gen_count > 0):
-                output_images[n] = processed.images[0]
-                init_image = processed.images[0]
-        else:
-            print(
-                f"No model B detections for output generation {n} with current settings.")
-
-
-def modeldataset(model_shortname):
-    path = modelpath(model_shortname)
-    if ("mmdet" in path and "segm" in path):
-        dataset = 'coco'
+    if len(masks_b_pre) > 0:
+        results_b_pre = update_result_masks(results_b_pre, masks_b_pre)
+        return results_b_pre, masks_b_pre
     else:
-        dataset = 'bbox'
-    return dataset
+        print(
+            f"No model B detections for output generation {n} with current settings.")
+        return None, None
 
 
-def modelpath(model_shortname):
-    model_list = modelloader.load_models(
-        model_path=dd_models_path, ext_filter=[".pth"])
-    model_h = model_shortname.split("[")[-1].split("]")[0]
-    for path in model_list:
-        if (model_hash(path) == model_h):
-            return path
+def generate_secondary_model_output(init_image, results_b_pre, masks_b_pre, n, start_seed, output_images, p, opts, state):
+    if results_b_pre:
+        segmask_preview_b = create_segmask_preview(results_b_pre, init_image)
+        shared.state.current_image = segmask_preview_b
+
+        if opts.dd_save_previews:
+            images.save_image(segmask_preview_b, opts.outdir_ddetailer_previews,
+                              "", start_seed, p.prompt, opts.samples_format, p=p)
+
+        gen_count = len(masks_b_pre)
+        state.job_count += gen_count
+        print(
+            f"Processing {gen_count} model B detections for output generation {n + 1}.")
+        p.seed = start_seed
+        p.init_images = [init_image]
+
+        for i in range(gen_count):
+            p.image_mask = masks_b_pre[i]
+            if opts.dd_save_masks:
+                images.save_image(masks_b_pre[i], opts.outdir_ddetailer_masks,
+                                  "", start_seed, p.prompt, opts.samples_format, p=p)
+            processed = processing.process_images(p)
+            p.seed = processed.seed + 1
+            p.init_images = processed.images
+
+        if gen_count > 0:
+            output_images[n] = processed.images[0]
+            init_image = processed.images[0]
+    else:
+        print(
+            f"No model B detections for output generation {n} with current settings.")
+
+
+def process_secondary_model(init_image, output_images, opts, p, state, start_seed, dd_model_b, dd_conf_b, dd_preprocess_b, dd_dilation_factor_b, dd_offset_x_b, dd_offset_y_b, n):
+    if dd_model_b != "None" and dd_preprocess_b:
+        results_b_pre, masks_b_pre = preprocess_secondary_model(
+            init_image, dd_model_b, dd_conf_b, dd_dilation_factor_b, dd_offset_x_b, dd_offset_y_b)
+        generate_secondary_model_output(
+            init_image, results_b_pre, masks_b_pre, n, start_seed, output_images, p, opts, state)
 
 
 def update_result_masks(results, masks):
@@ -298,6 +320,7 @@ def combine_masks(masks):
     combined_mask = Image.fromarray(combined_cv2_mask)
     return combined_mask
 
+
 def create_segmasks(results):
     segms = results[2]
     segmasks = []
@@ -309,28 +332,20 @@ def create_segmasks(results):
     return segmasks
 
 
-def get_device():
-    device_id = shared.cmd_opts.device_id
-    if device_id is not None:
-        cuda_device = f"cuda:{device_id}"
-    else:
-        cuda_device = "cpu"
-    return cuda_device
-
-
 def inference(image, modelname, conf_thres, label):
-    path = modelpath(modelname)
-    if ("mmdet" in path and "bbox" in path):
-        results = inference_mmdet_bbox(image, modelname, conf_thres, label)
-    elif ("mmdet" in path and "segm" in path):
-        results = inference_mmdet_segm(image, modelname, conf_thres, label)
+    if modelname == 'selfie_segmentation':
+        results = inference_selfie_segmentation(image, conf_thres)
+    elif modelname == 'face_detection':
+        results = inference_face_detection(image, conf_thres, label)
+    elif modelname == 'anime_face_detection':
+        results = inference_anime_face_detection(image, conf_thres, label)
     return results
 
 
-def inference_mmdet_segm(image, modelname, conf_thres, label):
+def inference_selfie_segmentation(image, conf_thres):
     mp_selfie_segmentation = mp.solutions.selfie_segmentation
     selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(
-        model_selection=0)
+        model_selection=1)
     results = selfie_segmentation.process(
         cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB))
     mask = np.stack((results.segmentation_mask,) * 3, axis=-1) > conf_thres
@@ -343,14 +358,14 @@ def inference_mmdet_segm(image, modelname, conf_thres, label):
     return [['person'], np.array(bbox_results), np.array(segm_results)]
 
 
-def inference_mmdet_bbox(image, modelname, conf_thres, label):
+def inference_face_detection(image, conf_thres, label):
     mp_face_detection = mp.solutions.face_detection
     mp_drawing = mp.solutions.drawing_utils
 
     bbox_results = []
     segm_results = []
 
-    with mp_face_detection.FaceDetection(min_detection_confidence=conf_thres, model_selection=int(1)) as face_detection:
+    with mp_face_detection.FaceDetection(min_detection_confidence=conf_thres, model_selection=1) as face_detection:
         image_rgb = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB)
         results_face_detection = face_detection.process(image_rgb)
 
@@ -369,5 +384,25 @@ def inference_mmdet_bbox(image, modelname, conf_thres, label):
 
                 bbox_results.append([x0, y0, x1, y1, detection.score[0]])
                 segm_results.append(cv2_mask_bool)
+
+    return [label, np.array(bbox_results), np.array(segm_results)]
+
+
+def detect_anime_faces(image, conf_thres, label):
+    animeface_cascade = cv2.CascadeClassifier('lbpcascade_animeface.xml')
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    animeface_results = animeface_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
+
+    bbox_results = []
+    segm_results = []
+
+    for (x, y, w, h) in animeface_results:
+        bbox_results.append([x, y, x+w, y+h, 1])
+        cv2_mask = np.zeros(gray.shape, np.uint8)
+        cv2.rectangle(cv2_mask, (int(x), int(y)),
+                      (int(x+w), int(y+h)), 255, -1)
+        cv2_mask_bool = cv2_mask.astype(bool)
+        segm_results.append(cv2_mask_bool)
 
     return [label, np.array(bbox_results), np.array(segm_results)]

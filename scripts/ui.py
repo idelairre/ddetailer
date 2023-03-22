@@ -2,12 +2,12 @@ import gradio as gr
 
 from modules import processing, images
 from modules.processing import Processed, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
-from modules import scripts, script_callbacks, shared, devices, modelloader
+from modules import scripts, script_callbacks, shared, modelloader
 from modules.shared import opts, cmd_opts, state
 
-import modules.ui
+# import modules.ui
 
-from .ddetailer import list_models, dd_models_path,  process_secondary_model, process_primary_model
+from .ddetailer import list_models, process_secondary_model, process_primary_model
 
 
 def gr_show(visible=True):
@@ -25,6 +25,10 @@ def on_ui_settings():
         "extensions/ddetailer/outputs/masks", 'Output directory for masks', section=("ddetailer", "Detection Detailer")))
 
 
+def to_model_name(model_name):
+    return model_name.lower().replace(" ", "_")
+
+
 class DetectionDetailerScript(scripts.Script):
     def title(self):
         return "Detection Detailer"
@@ -33,8 +37,6 @@ class DetectionDetailerScript(scripts.Script):
         return True
 
     def ui(self, is_img2img):
-        model_list = list_models(dd_models_path)
-        model_list.insert(0, "None")
         if is_img2img:
             info = gr.HTML(
                 "<p style=\"margin-bottom:0.75em\">Recommended settings: Use from inpaint tab, inpaint at full res ON, denoise <0.5</p>")
@@ -137,12 +139,12 @@ class DetectionDetailerScript(scripts.Script):
                 ]
 
     def run(self, p, info,
-            dd_model_a,
+            to_model_name(dd_model_a),
             dd_conf_a, dd_dilation_factor_a,
             dd_offset_x_a, dd_offset_y_a,
             dd_preprocess_b, dd_bitwise_op,
             br,
-            dd_model_b,
+            to_model_name(dd_model_b),
             dd_conf_b, dd_dilation_factor_b,
             dd_offset_x_b, dd_offset_y_b,
             dd_mask_blur, dd_denoising_strength,
@@ -195,8 +197,8 @@ class DetectionDetailerScript(scripts.Script):
         output_images = []
         state.job_count = ddetail_count
         for n in range(ddetail_count):
-            devices.torch_gc()
             start_seed = seed + n
+            
             if (is_txt2img):
                 print(
                     f"Processing initial image for output generation {n + 1}.")
