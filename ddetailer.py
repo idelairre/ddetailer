@@ -7,7 +7,7 @@ import mediapipe as mp
 
 
 def list_models():
-    return ['None', 'Selfie Segmentation', 'Face Detection', 'Anime Face Detection']
+    return ['None', 'Selfie Segmentation', 'Face Detection', 'Anime Face Detection', 'Human Segmentation']
 
 
 def to_model_name(model_name):
@@ -108,12 +108,20 @@ def subtract_masks(cv2_mask1, cv2_mask2):
 def dilate_masks(masks, dilation_factor, iter=1):
     if dilation_factor == 0:
         return masks
+
     dilated_masks = []
     kernel = np.ones((dilation_factor, dilation_factor), np.uint8)
-    for i in range(len(masks)):
-        cv2_mask = np.array(masks[i])
-        dilated_mask = cv2.dilate(cv2_mask, kernel, iter)
-        dilated_masks.append(Image.fromarray(dilated_mask))
+
+    for mask in masks:
+        cv2_mask = np.array(mask)
+
+        if cv2_mask.dtype != np.uint8:
+            cv2_mask = cv2_mask.astype(np.uint8)
+
+        if cv2_mask.size > 0:
+            dilated_mask = cv2.dilate(cv2_mask, kernel, iterations=iter)
+            dilated_masks.append(Image.fromarray(dilated_mask))
+
     return dilated_masks
 
 
@@ -143,14 +151,19 @@ def combine_masks(masks):
 
 
 def create_segmasks(results):
-    segms = results[2]
-    segmasks = []
-    for i in range(len(segms)):
-        cv2_mask = segms[i].astype(np.uint8) * 255
-        mask = Image.fromarray(cv2_mask)
-        segmasks.append(mask)
+    if results is None:
+        return []
 
-    return segmasks
+    labels = results[0]
+    bboxes = results[1]
+    segms = results[2]
+
+    masks = []
+    for i in range(len(segms)):
+        mask = segms[i]
+        masks.append(mask)
+
+    return masks
 
 
 def inference(image, modelname, conf_thres, label):
@@ -160,6 +173,8 @@ def inference(image, modelname, conf_thres, label):
         return inference_face_detection(image, conf_thres, label="Face")
     elif to_model_name(modelname) == 'anime_face_detection':
         return inference_anime_face_detection(image, conf_thres, label="Anime Face")
+    elif to_model_name(modelname) == 'inference_human_segmentation':
+        return inference_human_segmentation(image, conf_thres, label="Human")
 
 
 def inference_selfie_segmentation(image, conf_thres, label="Person"):
@@ -234,5 +249,43 @@ def inference_anime_face_detection(image, conf_thres, label='Anime Face'):
         cv2_mask_bool = cv2_mask.astype(bool)
         segm_results.append(cv2_mask_bool)
         labels.append(label)  # Append the label for each detected face
+
+    return [labels, np.array(bbox_results), np.array(segm_results)]
+
+
+def inference_mediapipe_human_segmentation(image, conf_thres=0.5, label='Human'):
+    mp_pose = mp.solutions.pose
+    if not isinstance(image, np.ndarray):
+        image = np.array(image)
+
+    bbox_results = []
+    segm_results = []
+    labels = []
+
+    with mp_pose.Pose(
+            static_image_mode=True,
+            model_complexity=2,
+            enable_segmentation=True,
+            min_detection_confidence=conf_thres) as pose:
+
+        image_height, image_width, _ = image.shape
+        results = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+        if results.pose_landmarks:
+            labels.append(label)
+            segmentation_mask = np.stack(
+                (results.segmentation_mask,) * 3, axis=-1)
+            segm_results.append(segmentation_mask > 0.1)
+
+            # Calculate bounding box
+            landmarks = results.pose_landmarks.landmark
+            landmarks_points = [(int(landmark.x * image_width),
+                                 int(landmark.y * image_height)) for landmark in landmarks]
+            xs, ys = zip(*landmarks_points)
+            x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
+            bbox_results.append([x_min, y_min, x_max, y_max, 1])
+
+    if not labels:
+        return [[], np.array([]), np.array([])]
 
     return [labels, np.array(bbox_results), np.array(segm_results)]
