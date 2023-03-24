@@ -2,7 +2,6 @@ import os
 import cv2
 from PIL import Image
 import numpy as np
-import gradio as gr
 import mediapipe as mp
 
 
@@ -253,7 +252,7 @@ def inference_anime_face_detection(image, conf_thres, label='Anime Face'):
     return [labels, np.array(bbox_results), np.array(segm_results)]
 
 
-def inference_mediapipe_human_segmentation(image, conf_thres=0.5, label='Human'):
+def inference_human_segmentation(image, conf_thres=0.5, label='Human'):
     mp_pose = mp.solutions.pose
     if not isinstance(image, np.ndarray):
         image = np.array(image)
